@@ -94,9 +94,9 @@ retained per message, capped at 3,000 to keep the tab alive:
 | heap retained | 21.6 MB |
 | per 1,000 messages | **7.2 MB** |
 
-That is roughly **225 MB/second** of retained heap, which reaches the ~13 GB of
-the original incident in about a minute — with the main thread saturated the
-whole time, since every iteration runs on it.
+That is roughly **225 MB/second** of retained heap. At that rate an unbounded
+loop passes 13 GB inside a minute, with the main thread saturated throughout
+since every iteration runs on it.
 
 Worth noting for the runtime mitigation: `typeof DedicatedWorkerGlobalScope` is
 `"undefined"` in `Window` and `"function"` in a worker, which is exactly why the
@@ -136,7 +136,7 @@ Worth noting for the runtime mitigation: `typeof DedicatedWorkerGlobalScope` is
 4. Arm and fire. **Start with bounded mode**, which stops itself after 5,000
    messages. Watch `messages` and `heap` climb in the panel.
 
-5. `Unbounded` reproduces the real incident shape. It will not stop on its own —
+5. `Unbounded` removes the cap. It will not stop on its own —
    use `Stop`, or close the tab. Do not run it on a machine you care about
    keeping responsive.
 
@@ -198,7 +198,7 @@ Cheap, and it survives a build config that later regresses. See
 ## Suggested upstream direction
 
 The plugin-side fixes work, but every plugin has to discover this
-independently — and the failure is silent until someone's tab hits 13 GB. Some
+independently — and the failure is silent until a tab exhausts memory. Some
 options for ComfyUI itself, roughly in order of how invasive they are:
 
 1. **Let plugins declare their entry points** instead of globbing the tree — for
@@ -210,21 +210,23 @@ options for ComfyUI itself, roughly in order of how invasive they are:
 3. **Warn on import** when a globbed module has no `registerExtension` call —
    surfaces both this bug and dead files, without changing behaviour.
 
-## A real instance
+## Not hypothetical
 
-This pattern was found in the wild in
-[ComfyTV](https://github.com/jtydhr88/ComfyTV) / pentrado, where an OPFS tile
-swap worker (`swapWorker.ts`) was emitted as `.js` under the served directory.
-Once imported into `Window`, its `self.postMessage` replies fed its own
-`self.onmessage`; the reported incident showed the browser at roughly 13 GB RSS
-with the renderer pegged at several hundred percent CPU. Fixed in
-[ComfyTV#429](https://github.com/jtydhr88/ComfyTV/pull/429), which applied both
-mitigations above — `.mjs` chunk naming plus a `DedicatedWorkerGlobalScope`
-guard.
+The shape this takes in a real plugin is mundane: a worker doing off-thread
+work — OPFS tile paging, image decoding, mesh processing — built by the standard
+toolchain, emitted as `.js`, dropped into the served directory. Nobody writes
+anything unusual; the entry point never references the worker file, and the
+plugin behaves correctly right up until the first message is sent.
 
-That project is now clean: `/extensions` returns only its single `main.js`,
-while 20 `.mjs` chunks under `js/assets/` are loaded by the entry point itself
-and never by ComfyUI.
+Extrapolating the rate measured above, an unbounded loop retains roughly
+**225 MB/second**, so a tab reaches multiple GB of resident memory within a
+minute of the first message, with the main thread saturated throughout. By the
+time it is noticed the browser is usually already unresponsive, and because the
+offending file was never imported by any code the author wrote, the stack traces
+point nowhere useful.
+
+The fix costs one build-config line and one `typeof` check — the hard part is
+knowing to look.
 
 ## Safety
 
